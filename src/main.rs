@@ -21,7 +21,8 @@ async fn main() -> std::io::Result<()> {
         CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY,
             email TEXT NOT NULL UNIQUE,
-            hashed_password TEXT NOT NULL
+            hashed_password TEXT NOT NULL,
+            user_salt TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS refresh_tokens (
             token TEXT PRIMARY KEY,

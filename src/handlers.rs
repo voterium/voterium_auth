@@ -2,7 +2,7 @@ use actix_web::{post, web, HttpResponse, Responder};
 use serde::{Serialize, Deserialize};
 use sqlx::SqlitePool;
 use uuid::Uuid;
-use crate::auth::{hash_password, verify_password, create_jwt, generate_refresh_token};
+use crate::auth::{hash_password, verify_password, create_jwt, generate_refresh_token, make_salt};
 use crate::models::{NewUser, User, UserResponse};
 use chrono::{Utc, Duration};
 
@@ -25,16 +25,20 @@ async fn register_user(
         },
     };
 
+    let user_salt = make_salt().to_string();
+
     let user = User {
         id: Uuid::new_v4().to_string(),
         email: new_user.email.clone(),
         hashed_password,
+        user_salt,
     };
 
-    let result = sqlx::query("INSERT INTO users (id, email, hashed_password) VALUES (?, ?, ?)")
+    let result = sqlx::query("INSERT INTO users (id, email, hashed_password, user_salt) VALUES (?, ?, ?, ?)")
         .bind(&user.id)
         .bind(&user.email)
         .bind(&user.hashed_password)
+        .bind(&user.user_salt)
         .execute(pool.get_ref())
         .await;
 
@@ -58,18 +62,18 @@ async fn login_user(
     credentials: web::Json<NewUser>,
     pool: web::Data<SqlitePool>,
 ) -> impl Responder {
-    let result = sqlx::query_as::<_, (String, String)>(
-        "SELECT id, hashed_password FROM users WHERE email = ?"
+    let result = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT id, hashed_password, user_salt FROM users WHERE email = ?"
     )
     .bind(&credentials.email)
     .fetch_one(pool.get_ref())
     .await;
 
     match result {
-        Ok((user_id, stored_hash)) => {
+        Ok((user_id, stored_hash, user_salt)) => {
             match verify_password(&stored_hash, &credentials.password) {
                 Ok(true) => {
-                    let access_token = match create_jwt(&user_id) {
+                    let access_token = match create_jwt(&user_id, &user_salt) {
                         Ok(token) => token,
                         Err(err) => {
                             eprintln!("JWT creation error: {}", err);
@@ -128,22 +132,22 @@ async fn refresh_token_handler(
     refresh_req: web::Json<RefreshRequest>,
     pool: web::Data<SqlitePool>,
 ) -> impl Responder {
-    let result = sqlx::query_as::<_, (String, i64)>(
-        "SELECT user_id, expires_at FROM refresh_tokens WHERE token = ?"
+    let result = sqlx::query_as::<_, (String, i64, String)>(
+        "SELECT user_id, expires_at, user_salt FROM refresh_tokens WHERE token = ?"
     )
     .bind(&refresh_req.refresh_token)
     .fetch_one(pool.get_ref())
     .await;
 
     match result {
-        Ok((user_id, expires_at)) => {
+        Ok((user_id, expires_at, user_salt)) => {
             if Utc::now().timestamp() > expires_at {
                 // Token has expired
                 return HttpResponse::Unauthorized().body("Refresh token expired");
             }
 
             // Generate new access token
-            let access_token = match create_jwt(&user_id) {
+            let access_token = match create_jwt(&user_id, &user_salt) {
                 Ok(token) => token,
                 Err(err) => {
                     eprintln!("JWT creation error: {}", err);

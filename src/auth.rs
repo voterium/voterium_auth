@@ -15,8 +15,12 @@ use anyhow::{Result, Context};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use rand::RngCore;
 
+pub fn make_salt() -> SaltString {
+    SaltString::generate(&mut OsRng)
+}
+
 pub fn hash_password(password: &str) -> Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
+    let salt = make_salt();
     let algo = Argon2::default();
     let password_hash = algo
         .hash_password(password.as_bytes(), &salt)
@@ -38,6 +42,7 @@ pub fn verify_password(hash: &str, password: &str) -> Result<bool> {
 pub struct Claims {
     sub: String,
     exp: usize,
+    salt: String,
 }
 
 lazy_static! {
@@ -54,7 +59,7 @@ lazy_static! {
     };
 }
 
-pub fn create_jwt(user_id: &str) -> Result<String> {
+pub fn create_jwt(user_id: &str, user_salt: &str) -> Result<String> {
     let expiration = Utc::now()
         .checked_add_signed(Duration::seconds(3600))
         .expect("Valid timestamp")
@@ -63,6 +68,7 @@ pub fn create_jwt(user_id: &str) -> Result<String> {
     let claims = Claims {
         sub: user_id.to_owned(),
         exp: expiration,
+        salt: user_salt.to_owned(),
     };
 
     let token = encode(&Header::new(Algorithm::EdDSA), &claims, &ENCODING_KEY)
