@@ -4,6 +4,7 @@ use sqlx::SqlitePool;
 use crate::auth::{hash_password, verify_password, create_jwt, generate_refresh_token, gen_random_b64_string};
 use crate::models::{NewUser, User, UserResponse};
 use chrono::{Utc, Duration};
+use log::{error, info, warn};
 
 #[derive(Serialize)]
 struct LoginResponse {
@@ -19,7 +20,7 @@ async fn register_user(
     let hashed_password = match hash_password(&new_user.password) {
         Ok(hash) => hash,
         Err(err) => {
-            eprintln!("Password hashing error: {}", err);
+            error!("Password hashing error: {}", err);
             return HttpResponse::InternalServerError().finish();
         },
     };
@@ -31,6 +32,7 @@ async fn register_user(
         user_salt: gen_random_b64_string(8),
     };
 
+    // Insert the new user without refresh_token and refresh_token_expiry
     let result = sqlx::query("INSERT INTO users (id, email, hashed_password, user_salt) VALUES (?, ?, ?, ?)")
         .bind(&user.id)
         .bind(&user.email)
@@ -41,6 +43,7 @@ async fn register_user(
 
     match result {
         Ok(_) => {
+            info!("New user registered: {}", user.email);
             let user_response = UserResponse {
                 id: user.id,
                 email: user.email,
@@ -48,7 +51,7 @@ async fn register_user(
             HttpResponse::Ok().json(user_response)
         }
         Err(err) => {
-            eprintln!("Database insertion error: {}", err);
+            error!("Database insertion error: {}", err);
             HttpResponse::InternalServerError().finish()
         },
     }
@@ -73,31 +76,32 @@ async fn login_user(
                     let access_token = match create_jwt(&user_id, &user_salt) {
                         Ok(token) => token,
                         Err(err) => {
-                            eprintln!("JWT creation error: {}", err);
+                            error!("JWT creation error: {}", err);
                             return HttpResponse::InternalServerError().finish();
                         },
                     };
 
                     let refresh_token = generate_refresh_token();
-                    let expires_at = Utc::now()
+                    let refresh_token_expiry = Utc::now()
                         .checked_add_signed(Duration::days(30))
                         .expect("Valid timestamp")
                         .timestamp();
 
-                    // Store refresh token in the database
+                    // Update the user's refresh_token and refresh_token_expiry
                     if let Err(err) = sqlx::query(
-                        "INSERT INTO refresh_tokens (token, user_id, expires_at) VALUES (?, ?, ?)"
+                        "UPDATE users SET refresh_token = ?, refresh_token_expiry = ? WHERE id = ?"
                     )
                     .bind(&refresh_token)
+                    .bind(refresh_token_expiry)
                     .bind(&user_id)
-                    .bind(expires_at)
                     .execute(pool.get_ref())
                     .await
                     {
-                        eprintln!("Database insertion error: {}", err);
+                        error!("Database update error: {}", err);
                         return HttpResponse::InternalServerError().finish();
                     }
 
+                    info!("User logged in: {}", credentials.email);
                     let response = LoginResponse {
                         access_token,
                         refresh_token,
@@ -105,15 +109,18 @@ async fn login_user(
 
                     HttpResponse::Ok().json(response)
                 }
-                Ok(false) => HttpResponse::Unauthorized().body("Invalid credentials"),
+                Ok(false) => {
+                    warn!("Invalid login attempt for user: {}", credentials.email);
+                    HttpResponse::Unauthorized().body("Invalid credentials")
+                }
                 Err(err) => {
-                    eprintln!("Password verification error: {}", err);
+                    error!("Password verification error: {}", err);
                     HttpResponse::InternalServerError().finish()
                 },
             }
         }
         Err(err) => {
-            eprintln!("Database query error: {}", err);
+            error!("Database query error: {}", err);
             HttpResponse::Unauthorized().body("Invalid credentials")
         },
     }
@@ -130,16 +137,16 @@ async fn refresh_token_handler(
     pool: web::Data<SqlitePool>,
 ) -> impl Responder {
     let result = sqlx::query_as::<_, (String, i64, String)>(
-        "SELECT user_id, expires_at, user_salt FROM refresh_tokens WHERE token = ?"
+        "SELECT id, refresh_token_expiry, user_salt FROM users WHERE refresh_token = ?"
     )
     .bind(&refresh_req.refresh_token)
     .fetch_one(pool.get_ref())
     .await;
 
     match result {
-        Ok((user_id, expires_at, user_salt)) => {
-            if Utc::now().timestamp() > expires_at {
-                // Token has expired
+        Ok((user_id, refresh_token_expiry, user_salt)) => {
+            if Utc::now().timestamp() > refresh_token_expiry {
+                warn!("Expired refresh token used by user_id: {}", user_id);
                 return HttpResponse::Unauthorized().body("Refresh token expired");
             }
 
@@ -147,18 +154,19 @@ async fn refresh_token_handler(
             let access_token = match create_jwt(&user_id, &user_salt) {
                 Ok(token) => token,
                 Err(err) => {
-                    eprintln!("JWT creation error: {}", err);
+                    error!("JWT creation error: {}", err);
                     return HttpResponse::InternalServerError().finish();
                 },
             };
 
+            info!("Access token refreshed for user_id: {}", user_id);
             HttpResponse::Ok().json(LoginResponse {
                 access_token,
                 refresh_token: refresh_req.refresh_token.clone(), // Reuse the same refresh token
             })
         }
         Err(err) => {
-            eprintln!("Database query error: {}", err);
+            error!("Database query error: {}", err);
             HttpResponse::Unauthorized().body("Invalid refresh token")
         },
     }
