@@ -60,9 +60,12 @@ async fn main() -> std::io::Result<()> {
             .wrap(cors)
             .wrap(Logger::default())
             .app_data(web::Data::new(pool.clone()))
-            .service(handlers::register_user)
-            .service(handlers::login_user)
-            .service(handlers::refresh_token_handler)
+            .service(
+                web::scope("/auth")
+                    .service(handlers::register_user)
+                    .service(handlers::login_user)
+                    .service(handlers::refresh_token_handler)
+            )
     })
     .bind("0.0.0.0:8081")?
     .run()
