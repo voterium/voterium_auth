@@ -1,8 +1,7 @@
 use actix_web::{post, web, HttpResponse, Responder};
 use serde::{Serialize, Deserialize};
 use sqlx::SqlitePool;
-use uuid::Uuid;
-use crate::auth::{hash_password, verify_password, create_jwt, generate_refresh_token, make_salt};
+use crate::auth::{hash_password, verify_password, create_jwt, generate_refresh_token, gen_random_b64_string};
 use crate::models::{NewUser, User, UserResponse};
 use chrono::{Utc, Duration};
 
@@ -25,13 +24,11 @@ async fn register_user(
         },
     };
 
-    let user_salt = make_salt().to_string();
-
     let user = User {
-        id: Uuid::new_v4().to_string(),
+        id: gen_random_b64_string(16),
         email: new_user.email.clone(),
         hashed_password,
-        user_salt,
+        user_salt: gen_random_b64_string(8),
     };
 
     let result = sqlx::query("INSERT INTO users (id, email, hashed_password, user_salt) VALUES (?, ?, ?, ?)")

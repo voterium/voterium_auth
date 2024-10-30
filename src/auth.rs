@@ -12,15 +12,19 @@ use chrono::{Utc, Duration};
 use lazy_static::lazy_static;
 use anyhow::{Result, Context};
 
-use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rand::RngCore;
 
-pub fn make_salt() -> SaltString {
-    SaltString::generate(&mut OsRng)
+
+pub fn gen_random_b64_string(length: usize) -> String {
+    let mut random_bytes = vec![0u8; length];
+    OsRng.fill_bytes(&mut random_bytes);
+    URL_SAFE_NO_PAD.encode(&random_bytes)
 }
 
+
 pub fn hash_password(password: &str) -> Result<String> {
-    let salt = make_salt();
+    let salt = SaltString::generate(&mut OsRng);
     let algo = Argon2::default();
     let password_hash = algo
         .hash_password(password.as_bytes(), &salt)
@@ -86,5 +90,5 @@ pub fn verify_jwt(token: &str) -> Result<TokenData<Claims>> {
 pub fn generate_refresh_token() -> String {
     let mut random_bytes = [0u8; 32]; // 256 bits
     OsRng.fill_bytes(&mut random_bytes);
-    STANDARD_NO_PAD.encode(&random_bytes)
+    URL_SAFE_NO_PAD.encode(&random_bytes)
 }
