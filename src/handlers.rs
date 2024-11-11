@@ -1,8 +1,8 @@
-use actix_web::{post, web, HttpResponse, Responder};
+use actix_web::{get, post, web, HttpMessage, HttpResponse, Responder};
 use serde::{Serialize, Deserialize};
 use sqlx::SqlitePool;
 use crate::auth::{hash_password, verify_password, create_jwt, generate_refresh_token, gen_random_b64_string};
-use crate::models::{NewUser, User, UserResponse};
+use crate::models::{AppState, NewUser, User, UserResponse};
 use chrono::{Utc, Duration};
 use log::{error, info, warn};
 
@@ -48,7 +48,7 @@ async fn register_user(
                 id: user.id,
                 email: user.email,
             };
-            HttpResponse::Ok().json(user_response)
+            HttpResponse::Created().json(user_response)
         }
         Err(err) => {
             error!("Database insertion error: {}", err);
@@ -61,6 +61,7 @@ async fn register_user(
 async fn login_user(
     credentials: web::Json<NewUser>,
     pool: web::Data<SqlitePool>,
+    app_state: web::Data<AppState>,
 ) -> impl Responder {
     let result = sqlx::query_as::<_, (String, String, String)>(
         "SELECT id, hashed_password, user_salt FROM users WHERE email = ?"
@@ -73,7 +74,7 @@ async fn login_user(
         Ok((user_id, stored_hash, user_salt)) => {
             match verify_password(&stored_hash, &credentials.password) {
                 Ok(true) => {
-                    let access_token = match create_jwt(&user_id, &user_salt) {
+                    let access_token = match create_jwt(&user_id, &user_salt, &app_state.encoding_key) {
                         Ok(token) => token,
                         Err(err) => {
                             error!("JWT creation error: {}", err);
@@ -135,6 +136,7 @@ struct RefreshRequest {
 async fn refresh_token_handler(
     refresh_req: web::Json<RefreshRequest>,
     pool: web::Data<SqlitePool>,
+    app_state: web::Data<AppState>,
 ) -> impl Responder {
     let result = sqlx::query_as::<_, (String, i64, String)>(
         "SELECT id, refresh_token_expiry, user_salt FROM users WHERE refresh_token = ?"
@@ -151,7 +153,7 @@ async fn refresh_token_handler(
             }
 
             // Generate new access token
-            let access_token = match create_jwt(&user_id, &user_salt) {
+            let access_token = match create_jwt(&user_id, &user_salt, &app_state.encoding_key) {
                 Ok(token) => token,
                 Err(err) => {
                     error!("JWT creation error: {}", err);
@@ -171,3 +173,38 @@ async fn refresh_token_handler(
         },
     }
 }
+
+#[get("/me")]
+async fn get_user_me(
+    req: actix_web::HttpRequest,
+    pool: web::Data<SqlitePool>,
+) -> impl Responder {
+
+    let extensions = req.extensions();
+    let claims = extensions.get::<crate::models::Claims>().unwrap();
+    let user_id = &claims.sub;
+
+    let result = sqlx::query_as::<_, (String, String)>(
+        "SELECT id, email FROM users WHERE id = ?"
+    )
+    .bind(user_id)
+    .fetch_one(pool.get_ref())
+    .await;
+
+    match result {
+        Ok((id, email)) => {
+            info!("User details retrieved for user_id: {}", user_id);
+            let user_response = UserResponse {
+                id,
+                email,
+            };
+            HttpResponse::Ok().json(user_response)
+        }
+        Err(err) => {
+            error!("Database query error: {}", err);
+            HttpResponse::InternalServerError().finish()
+        },
+    }
+
+}
+

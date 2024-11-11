@@ -1,27 +1,21 @@
+use crate::models::Claims;
+use anyhow::{Context, Result};
 use argon2::{
-    password_hash::{
-        rand_core::OsRng,
-        PasswordHash, PasswordHasher, PasswordVerifier, SaltString
-    },
-    Argon2
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
 };
-use jsonwebtoken::{encode, decode, Header, Algorithm, EncodingKey, DecodingKey, Validation, TokenData};
-use serde::{Serialize, Deserialize};
+use chrono::{Duration, Utc};
+use jsonwebtoken::{encode, Algorithm, DecodingKey, EncodingKey, Header};
 use std::{env, fs};
-use chrono::{Utc, Duration};
-use lazy_static::lazy_static;
-use anyhow::{Result, Context};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rand::RngCore;
-
 
 pub fn gen_random_b64_string(length: usize) -> String {
     let mut random_bytes = vec![0u8; length];
     OsRng.fill_bytes(&mut random_bytes);
     URL_SAFE_NO_PAD.encode(&random_bytes)
 }
-
 
 pub fn hash_password(password: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
@@ -42,28 +36,23 @@ pub fn verify_password(hash: &str, password: &str) -> Result<bool> {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct Claims {
-    sub: String,
-    exp: usize,
-    salt: String,
+pub fn load_key_pair() -> (EncodingKey, DecodingKey) {
+    let private_key_path = env::var("JWT_PRIVATE_KEY_PATH").unwrap_or("key.pem".to_owned());
+    let private_key = fs::read(&private_key_path)
+        .expect(&format!("Failed to read private key {}", &private_key_path));
+    let encoding_key = EncodingKey::from_ed_pem(&private_key)
+        .expect(&format!("Invalid private key {}", private_key_path));
+
+    let public_key_path = env::var("JWT_PUBLIC_KEY_PATH").unwrap_or("key.pub".to_owned());
+    let public_key = fs::read(&public_key_path)
+        .expect(&format!("Failed to read public key {}", &public_key_path));
+    let decoding_key = DecodingKey::from_ed_pem(&public_key)
+        .expect(&format!("Invalid public key {}", public_key_path));
+
+    (encoding_key, decoding_key)
 }
 
-lazy_static! {
-    static ref ENCODING_KEY: EncodingKey = {
-        let private_key_path = env::var("JWT_PRIVATE_KEY_PATH").expect("JWT_PRIVATE_KEY_PATH not set");
-        let private_key = fs::read(private_key_path).expect("Failed to read private key");
-        EncodingKey::from_ed_pem(&private_key).expect("Invalid private key")
-    };
-
-    static ref DECODING_KEY: DecodingKey = {
-        let public_key_path = env::var("JWT_PUBLIC_KEY_PATH").expect("JWT_PUBLIC_KEY_PATH not set");
-        let public_key = fs::read(public_key_path).expect("Failed to read public key");
-        DecodingKey::from_ed_pem(&public_key).expect("Invalid public key")
-    };
-}
-
-pub fn create_jwt(user_id: &str, user_salt: &str) -> Result<String> {
+pub fn create_jwt(user_id: &str, user_salt: &str, encoding_key: &EncodingKey) -> Result<String> {
     let expiration = Utc::now()
         .checked_add_signed(Duration::seconds(3600))
         .expect("Valid timestamp")
@@ -75,16 +64,9 @@ pub fn create_jwt(user_id: &str, user_salt: &str) -> Result<String> {
         salt: user_salt.to_owned(),
     };
 
-    let token = encode(&Header::new(Algorithm::EdDSA), &claims, &ENCODING_KEY)
+    let token = encode(&Header::new(Algorithm::EdDSA), &claims, encoding_key)
         .context("Failed to create JWT")?;
     Ok(token)
-}
-
-pub fn verify_jwt(token: &str) -> Result<TokenData<Claims>> {
-    let validation = Validation::new(Algorithm::EdDSA);
-    let token_data = decode::<Claims>(token, &DECODING_KEY, &validation)
-        .context("Failed to verify JWT")?;
-    Ok(token_data)
 }
 
 pub fn generate_refresh_token() -> String {
